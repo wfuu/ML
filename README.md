@@ -1,7 +1,7 @@
 ## Coding Assignments and Practice
 ###  Based on "The Elements of Statistical Learning"
 
-This repository contains implementation of various machine learning algorithms based on QMSS 4058 and STAT 5241 courses at Columbia.
+This repository contains implementation of various machine learning algorithms based on QMSS 4058 and STAT 5241 courses at Columbia. All R code is accompanied by explanatory narration.
 
 *Optimization, PCR, Classification:*
 Assignment tasks are to optimize a loss function in R; run a PCR model; and explore the best model for classifying a binary outcome.
