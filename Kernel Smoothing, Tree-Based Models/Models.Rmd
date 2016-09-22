@@ -1,0 +1,139 @@
+---
+title: "Smoothing, Trees"
+author: "Wen Fu"
+date: "November 22, 2015"
+output: 
+  html_document: 
+    keep_md: yes
+---
+__1 Smooth nonlinear models for a continuous outcome__
+
+Use the `College` dataset, do the following: 
+* Split the data into a training set and a testing set in some appropriate fashion. Use the `lm()` and `step()` functions to obtain a decent linear model for `Outstate` in the training data that also includes whatever interactions you feel are appropriate.
+
+* Use the `gam` function to fit a Generalized Additive Model where `Outstate` is the outcome using the predictors from your best model for the training data in previous part. 
+
+* Which predictors, if any, exhibit a non-linear relationship with `Outstate`, conditional on the other predictors?
+
+* Use the results to predict `Outstate` in the testing data. Is the average squared error in the testing data greater, less than, or about the same than in the training data? Why is that the case?
+
+```{r}
+stopifnot(require(ISLR))
+str(College)
+```
+
+* I choose to include the following variables: `Private`, `Room.Board`, `S.F.Ratio`, and `perc.alumni`, but not any interaction terms. The `step()` model does not drop any variables from the the OLS model. 
+
+```{r}
+train <- College[1:388, ]
+test <- College[389:777, ]
+ols <- lm(Outstate ~ Private + Room.Board + S.F.Ratio + perc.alumni, data = train)
+ols_subset <- step(ols, trace = FALSE)
+setdiff(names(coef(ols)), names(coef(ols_subset)))
+```
+
+* After running GAM, the plots can be interpreted as follows: holding other variables fixed, `Outstate` for private colleges is higher than for public colleges; holding other variables fixed, `Outstate` increases as `Room.Board` increases, but it stops increasing as `Room.Board` goes above $6,000; holding other variables fixed, `Outstate` decreases as `S.F.Ratio` increases until it reaches around 20, but `Outstate` goes back up as `S.F.Ratio` goes above 20; holding other variables fixed, `Outstate` increases as `perc.alumni` increases, and the relationship is very close to linear.
+
+```{r}
+stopifnot(require(gam))
+gam <- gam(Outstate ~ Private + s(Room.Board, 5) + s(S.F.Ratio, 5) + s(perc.alumni, 5), data = train)     
+# The s() argument doesn't handle interactions well, so put the interactions directly in the model.
+yhat <- predict(gam)
+par(mfrow = c(1, 4), mar = c(4, 2, 4, 2))
+plot(gam, col = "blue")
+```
+
+* As shown in the plots above, the `Room.Board` and `S.F.Ratio` variables seem to exhibit a non-linear relationship with `Outstate`. `Outstate` increases until `Room.Board` reaches near $6,000, and `Outstate` starts to decrease slightly before evening out. However, the number of observed `Room.Board` values above $6,000 is much smaller according to the scatterplot below, so the decrease in `Outstate` may be due to these outliers. 
+
+`Outstate` decreases until `S.F.Ratio` reaches around 20. `Outstate` hits a minimum and increases again as `S.F.Ratio` continues to increase. The same outlier concern is present: The number of observed `S.F.Ratio` data points above 20 is much smaller, as is clearly illustrated in the scatterplot below. If these outlier data points were excluded, then the relationships may be closer to linear for both `Room.Board` and `S.F.Ratio`.
+
+```{r}
+par(mfrow = c(1, 2))
+plot(train$Room.Board, train$Outstate, col = "aquamarine4")
+plot(train$S.F.Ratio, train$Outstate, col = "darkorange")
+```
+
+* Interestingly, the mean prediction error in the testing data is smaller than the mean squared error in the training data. Compared to a linear model, the GAM is more flexible and provides a better fit in terms of least squares. 
+
+```{r}
+yhat_t <- predict(gam, newdata = test)
+mean((train$Outstate - yhat)^2)
+mean((test$Outstate - yhat_t)^2)
+```
+
+__2 Tree-based models for a binary outcome__
+
+These data are again from LendingClub.com but this time the outcome of interest is whether a loan was approved, rather than whether a loan was not repayed. 
+
+* Split the data into a training set and a testing set in some appropriate fashion. Fit a logit model to the outcome in the training data, using whatever interaction and polynomial terms you feel are appropriate.
+
+* Use different tree-based approaches to fit the outcome in the training data.
+
+* Rank the three approaches in terms of which is most likely to yield a correct prediction in the testing data.
+
+```{r}
+#setwd()
+load("dataset2.RData")
+str(dataset)
+```
+
+* I choose to regress on the following variables, including a cubic polynomial on `Employment.Length`.
+
+```{r}
+training <- dataset[1:5000, ]
+testing <- dataset[5001:10000, ]
+logit <- glm(y ~ Amount.Requested + Debt.To.Income.Ratio + poly(Employment.Length, 3, raw = T), data = training, family = "binomial")
+```
+
+* __Bagging__
+
+The total number of variables in my model is 5. First run a bagging model on the classification.
+
+```{r}
+stopifnot(require(randomForest))
+bag <- randomForest(y ~ Amount.Requested + Debt.To.Income.Ratio + Employment.Length + I(Employment.Length ^ 2 ) + I(Employment.Length ^ 3), data = training, mtry = 5, importance = TRUE)
+```
+
+* __Boosting__
+
+```{r}
+stopifnot(require(gbm))
+boost <- gbm(y ~ Amount.Requested + Debt.To.Income.Ratio + Employment.Length + I(Employment.Length ^ 2 ) + I(Employment.Length ^ 3), data = training, distribution = "bernoulli", n.trees = 100, interaction.depth = 3)
+```
+
+* __Random Forest__
+
+```{r}
+rdForest <- randomForest(y ~ Amount.Requested + Debt.To.Income.Ratio + Employment.Length + I(Employment.Length ^ 2 ) + I(Employment.Length ^ 3), data = training, importance = TRUE)
+rdForest
+varImpPlot(rdForest)
+```
+
+* The predictions of each classification model are as follows. According to the tables, the rank of accuracy of prediction in terms of classification error rate is bagging > logit > boosting.
+
+```{r}
+yhat_l <- predict(logit, newdata = testing, type = "response")
+yhat_bg <- predict(bag, newdata = testing, type = "class")
+yhat_bt <- predict(boost, newdata = testing, type = "response", n.trees = 100)
+yhat_rf <- predict(rdForest, newdata = testing, type = "response")
+
+correct_l <- mean((testing$y == 1) == (yhat_l > 0.5))
+z_l <- as.integer(yhat_l > 0.5)
+table(testing$y, z_l)
+
+correct_bg <- mean((testing$y == 1) == (yhat_bg > 0.5))
+z_bg <- as.integer(yhat_bg > 0.5)
+table(testing$y, z_bg)
+
+correct_bt <- mean((testing$y == 1) == (yhat_bt > 0.5))
+z_bt <- as.integer(yhat_bt > 0.5)
+table(testing$y, z_bt)
+
+correct_rf <- mean((testing$y == 1) == (yhat_rf > 0.5))
+z_rf <- as.integer(yhat_rf > 0,5)
+table(testing$y, z_rf)
+
+round(c(logit = correct_l, bagging = correct_bg, boosting = correct_bt, RF = correct_rf), 3)
+```
+
+In this case, random forest has the highest proportion of correct predictions.

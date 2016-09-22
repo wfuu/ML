@@ -1,0 +1,154 @@
+---
+title: "Optimization, PCR, Classification Modeling"
+author: "Wen Fu"
+date: "November 8, 2015"
+output: 
+  html_document: 
+    keep_md: yes
+---
+
+__1 Optimization__
+There are two `data.frames` that each contain 109 randomly selected observations on apartments for purchase in a Western European city in 2005. The dependent variable is `totalprice`, which is the purchase price of the apartment in Euros. There are 14 possible predictors (area, elevator, heating, etc.). Use the `training` data.frame to estimate models that are linear in their parameters and select the “best” such model according to which has the smallest average squared error when you predict `totalprice` in the `testing` data.
+
+Then, write a function in R that inputs a numeric vector of proposals for the coefficients and outputs the sum of squared residuals. Finally, use the `optim()` function in R to find the parameters that minimize your function. Verify that they are quite similar to those obtained via `lm()`. 
+
+##################
+My best model was reached by running stepwise regression on the OLS model. The model is recreated below.
+
+```{r}
+#setwd()
+training <- readRDS(gzcon(url('https://courseworks.columbia.edu/x/pJdP39')))
+testing <- readRDS(gzcon(url('https://courseworks.columbia.edu/x/QnKLgY')))
+ols <- lm(totalprice ~., data = training)
+ols_subset <- step(ols, trace = FALSE)
+```
+
+Then, write a function that inputs a vector of proposed coefficients on predictors from the above model, and returns the sum of squared residuals based on the training dataset.
+
+```{r}
+X <- model.matrix(ols_subset)
+y <- training$totalprice
+SSR <- function(coef_ols) {
+        y_hat <- X %*% coef_ols
+        return(sum((y - y_hat)^2))
+}
+```
+
+Then, use the `optim` function to find the minimum of the coefficients. 
+
+```{r}
+opt <- optim(rep(0, ncol(X)), fn = SSR, method = "BFGS")
+```
+
+Compare the above to the coefficient estimates from the stepwise regression model. They are quite similar.
+
+```{r}
+cbind(coef(ols_subset), opt$par)
+```
+
+__2 Principle Components Regression__
+Use the `pcr()` function in the `pls` R package to estimate a regression model on the training data where the outcome is the total price of the apartment and the predictors are all other variables in the trainingdata. Then,use the `predict()` function with `newdata` = `testing` to get a $N$ x 1 x $K$ array of predicted values for the price of the apartment in the testing data for a model that retains $k \leqslant K$ principal components of the $N$ x $K$ $\mathbf{X}$ matrix of predictors in the testing data. What value of $k$ yields the best predictive model under the average squared error criterion?
+
+##################
+First, fit a principal component regression model on the training dataset.
+
+```{r}
+stopifnot(require(pls))
+PCR <- pcr(totalprice ~ ., data = training)
+```
+
+Then, predict _totalprice_ values in the testing dataset, using up to _K_ = 48 components. The predictions are a 109 x 1 x 48 array.
+
+```{r}
+y_hatPCR <- predict(PCR, newdata = testing)
+```
+
+Then, find the _k_ value with the minimum mean prediction error.
+
+```{r}
+pred_k <- lapply(1:48, function(x) mean((testing$totalprice - y_hatPCR[, , x])^2))
+which.min(pred_k)
+min(as.numeric(pred_k))
+```
+
+The predicted value when _k_ = 44 yields a lower mean prediction error than my best model.
+
+```{r}
+y_hatTT <- predict(ols_subset, newdata = testing)
+with(testing, mean((totalprice - y_hatTT)^2))
+```
+
+__3 Data Mining with Binary Outcome__
+There will now be a `data.frame` with 6631 rows called `dataset` that has actual data on personal loans for 19 variables (including 18 IVs and 1 DV, the binary outcome which is 1 if the loan was defaulted on, charged off, very behind at the time the dataset was created, etc. and is 0 if the loan was (or is being) fully paid on time.
+
+##################
+_Summarise Data_
+
+```{r}
+#setwd()
+load("dataset.RData")
+str(dataset)
+```
+
+It is possible to create a new variable that identifies the purpose/use of the loan. In this case, the new categories are major, debt, house, investment, fund, or other, as possible categories that define what people requested the loan for.
+
+```{r}
+dataset$purpose6 <- as.factor(with(dataset, 
+                 ifelse(purpose %in% c("car", "major_purchase", "medical"), "major",
+                 ifelse(purpose %in% c("credit_card", "debt_consolidation"), "debt",
+                 ifelse(purpose %in% c("home_improvement", "house", "moving"), "house",
+                 ifelse(purpose %in% c("educational", "renewable_energy", "small_business"), "investment",
+                 ifelse(purpose == "other", "other",
+                 ifelse(purpose %in% c("vacation", "wedding"), "fun", NA_character_))))))))
+dataset$revol_bal_to_income <- dataset$revol_bal / dataset$annual_inc
+dataset$installment_to_income <- dataset$installment * 12 / dataset$annual_inc
+
+train <- dataset[1:3315, ]
+test <- dataset[3316:6631, ]
+```
+
+_Plot_
+
+Create a scatterplot between the ratios of `installment` (the amount of money the borrower is scheduled to pay each month) to `annual_inc` and `revol_bal` (the total revolving balance the borrower has) to `annual_inc`. The shape of the dots is defined by the verification status (__y__ being 0 or 1), the color of the dots is defined by the purpose of the loan.
+```{r}
+par(mar = c(5,4,2,2) + .1, las = 1, bg = "ivory2")
+with(train, plot(installment_to_income, revol_bal_to_income, 
+                    xlab = "Repayment / Income", ylab = "Balance / Income", 
+                    pch = 20 + as.integer(verification_status), 
+                    bg = ifelse(y == 0, 0, 1 + as.integer(purpose6)), 
+                    col = 1 + as.integer(purpose6), cex = 0.5, xlim = c(0, 0.25), ylim = 0:1))
+legend("topright", legend = levels(dataset$purpose6), text.col = 2:7, box.lwd = NA, 
+       title = "Purpose:", title.col = 1, xjust = 1, inset = 0, bg = NA)
+legend("bottomright", legend = levels(dataset$verification_status), pch = 21:23,
+       title = "Income:", box.lwd = NA, xjust = 1, inset = 0, bg = NA)
+legend("top", legend = c("yes", "no"), fill = 1:0, bg = NA,
+       title = "Defaulted?", box.lwd = NA, ncol = 2)
+```
+
+_Logit Model_
+
+First, run a logit regression on the training data and fit the same predictors with the testing data. 
+
+```{r}
+logit <- glm(y ~ loan_amnt * int_rate + term, data = train, family = binomial)
+y_hatLogit <- predict(logit, type = "response", newdata = test)
+summary(y_hatLogit)
+```
+
+Then, classify the fitted values into the categories specified.
+
+```{r}
+z_logit <- as.integer(y_hatLogit > 0.5)
+```
+
+Compare the predictions with the actual values in the testing data.
+
+```{r}
+table(test$y, z_logit)
+```
+
+```{r}
+2868 / (2868 + 448)
+```
+
+It shows that this model correctly predicts the outcome in the testing data around 86% of the time.

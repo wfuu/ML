@@ -1,0 +1,419 @@
+---
+title: "G4058 Final Project"
+author: "Fu, Wen & Lau, Arnold"
+date: "December 20, 2015"
+output: html_document
+---
+
+###1. Introduction
+
+This project will be using a dataset from Paralyzed Veterans of America (PVA) that was previously used for the 1998 Knowledge Discovery and Data Mining (KDD) Cup. The dataset consists of 191,779 donors who have donated to PVA at least once between June 1995 and June 1996, but who have not donated anything between June 1996 and June 1997. These are referred to as "lapsed" donors, or donors who made their last donation 13 to 24 months ago. These donors were subsequently all solicited for a promotional campaign in June 1997. The variable to be predicted is __TARGET\_B__, which tallies whether or not the donor responded to the June 1997 promotion.  
+
+```{r message = FALSE}
+options(java.parameters = "-Xmx6g") # set 6GB of memory aside for the Java heap space for bartMachine()
+library(dplyr)
+library(lattice)
+train <- read.table("KDD/cup98lrn/cup98LRN.txt", header = TRUE, sep = ",", skipNul = TRUE)
+dim(train)
+test <- read.table("KDD/cup98val/cup98VAL.txt", header = TRUE, sep = ",", skipNul = TRUE)
+# test_targets contains two response variables: whether or not a donor responded to the campaign, 
+# and how much money they gave if they did. In this project we are only predicting whether or not
+# a donor responded, i.e. classification.
+test_targets <- read.table("KDD/valtargt.txt", header = TRUE, sep = ",", skipNul = TRUE)
+# bind the response variable to the testing data via the unique id CONTROLN
+test <- arrange(test, CONTROLN) 
+test <- cbind(test, test_targets[,2:3])
+rm(test_targets)
+dim(test)
+```
+
+Due to the use of computationally intensive methods, we take a random sample of 10000 observations from the training set and 10000 observations from the testing set to predict with. (Otherwise, algorithms like bartMachine would take hours.)
+
+```{r}
+set.seed(4058)
+train_samp <- sample_n(train, 10000)
+test_samp <- sample_n(test, 10000)
+rm(train, test)
+```
+###2. Feature Selection & Description  
+The dataset was previously divided by the contest organizers into a training set with 95,412 observations and a testing set with 96,367 observations. There are a total of 481 features in the dataset, some of which are more relevant than others. For this project we extracted only a selection of variables that we judged would be better predictors of the response variable. We also recoded some of the variables when appropriate. In order to make the recoding less redundant, we combine the training and testing data first and then resplit them after recoding is complete. Descriptions of each variable follow.  
+
+```{r}
+combi <- rbind(train_samp, test_samp)
+sub <- c("PVASTATE", "DOMAIN", "AGE", "HOMEOWNR", "WEALTH2", "STATE", "GENDER", "HIT", "MALEMILI",
+         "MALEVET", "VIETVETS", "WWIIVETS", "LOCALGOV", "STATEGOV", "FEDGOV", "MAJOR", "VETERANS", 
+         "PEPSTRFL", "ETH7", "ETH10", "ETH11", "AFC1", "AFC2", "AFC3", "AFC4", "AFC5", "AFC6",
+         "VC1", "VC2", "VC3", "VC4", "NUMPRM12", "CARDGIFT", "TIMELAG", "AVGGIFT", "LASTGIFT", "RFA_2R", 
+         "RFA_2F", "RFA_2A", "RFA_3", "MDMAUD_R", "MDMAUD_F", "MDMAUD_A", "TARGET_B")
+combi_sub <- combi[, sub]
+```
+
+* __PVASTATE__ indicates whether the donor lives in a state served by a PVA chapter. This variable distinguishes between PVA chapters and EPVA (Eastern Paralyzed Veterans of America) chapters, a distinction which we do not think is important, so we create a new variable __PVASTATE\_BIN__ which is just 1 if __PVASTATE__ is "E" or "P" and 0 otherwise.  
+```{r}
+summary(train_samp$PVASTATE)
+combi_sub$PVASTATE_BIN[combi_sub$PVASTATE == "E" | combi_sub$PVASTATE == "P"] <- 1
+combi_sub$PVASTATE_BIN[combi_sub$PVASTATE != "E" & combi_sub$PVASTATE != "P"] <- 0
+combi_sub$PVASTATE_BIN <- as.factor(combi_sub$PVASTATE_BIN)
+```
+
+* Each value in __DOMAIN__ is two characters. The first character describes whether the donor's neighborhood is urban, city, suburban, town or rural. The second character classifies the socio-economic status (SES) of the donor's neighborhood as highest, average or lowest. We split __DOMAIN__ into two separate variables __URBANICITY__ and __NBHOOD\_SES__.  City, suburban, town and rural areas all had 3 categories of SES, while urban areas had 4, replacing "average" with "above average" and "below average". In coding __NBHOOD\_SES__ we consider both as just "average". Missing values are given their own category, "not mentioned", in order to accommodate algorithms that won't run with missing values (such as randomForest).   
+
+```{r}
+summary(train_samp$DOMAIN)
+
+combi_sub$URBANICITY[substr(combi_sub$DOMAIN, 1, 1) == "U"] <- "Urban"
+combi_sub$URBANICITY[substr(combi_sub$DOMAIN, 1, 1) == "C"] <- "City"
+combi_sub$URBANICITY[substr(combi_sub$DOMAIN, 1, 1) == "S"] <- "Suburban"
+combi_sub$URBANICITY[substr(combi_sub$DOMAIN, 1, 1) == "T"] <- "Town"
+combi_sub$URBANICITY[substr(combi_sub$DOMAIN, 1, 1) == "R"] <- "Rural"
+combi_sub$URBANICITY[combi_sub$DOMAIN == " "] <- "Not mentioned"
+combi_sub$URBANICITY <- as.factor(combi_sub$URBANICITY)
+
+combi_sub$NBHOOD_SES[substr(combi_sub$DOMAIN, 2, 2) == "1"] <- "Highest SES"
+combi_sub$NBHOOD_SES[substr(combi_sub$DOMAIN, 2, 2) == "2"] <- "Average SES" 
+combi_sub$NBHOOD_SES[substr(combi_sub$DOMAIN, 2, 2) == "3" & 
+                     substr(combi_sub$DOMAIN, 1, 1) == "U"] <- "Average SES"
+combi_sub$NBHOOD_SES[substr(combi_sub$DOMAIN, 2, 2) == "3" &
+                     substr(combi_sub$DOMAIN, 1, 1) != "U"] <- "Lowest SES"
+combi_sub$NBHOOD_SES[substr(combi_sub$DOMAIN, 2, 2) == "4"] <- "Lowest SES"
+combi_sub$NBHOOD_SES[combi_sub$DOMAIN == " "] <- "Not mentioned"
+combi_sub$NBHOOD_SES <- as.factor(combi_sub$NBHOOD_SES)
+```
+
+* __AGE__ ranges from 1 to 98, with a median of 62 and 2,465 missing values. Comparing TARGET\_B between those with age values and those without, it doesn't seem like a systematic difference is present, so we can leave __AGE__ as is for now.   
+```{r}
+summary(train_samp$AGE)
+train_samp$AGE_MISSING <- ifelse(is.na(train_samp$AGE), 1, 0)
+prop.table(table(train_samp$AGE_MISSING, train_samp$TARGET_B), margin = 1)
+```
+
+* __HOMEOWNR__ is "H" if the donor is a known homeowner, "U" if unknown, and then there are 2,329 missing values. We recode this int __HOMEOWNR\_BIN__ which is 1 if the donor is a known homeowner and 0 otherwise.
+
+```{r}
+combi_sub$HOMEOWNR_BIN[combi_sub$HOMEOWNR == "H"] <- 1
+combi_sub$HOMEOWNR_BIN[combi_sub$HOMEOWNR == "U"] <- 0
+combi_sub$HOMEOWNR_BIN[combi_sub$HOMEOWNR == " "] <- 0
+combi_sub$HOMEOWNR_BIN <- as.factor(combi_sub$HOMEOWNR_BIN)
+```
+
+* __WEALTH2__ indexes relative wealth within each state, with 0 being the lowest income group and 9 being the highest. We recode this as __WEALTH2\_CAT__, a factor.
+```{r}
+histogram(train_samp$WEALTH2, nint = 10)
+combi_sub$WEALTH2_CAT <- as.factor(combi_sub$WEALTH2)
+```
+
+* __STATE__ includes all 50 U.S states and the District of Columbia, as well as mail from U.S. armed forces stationed in various parts of the world ("AA", "AE", "AP"), American Samoa, Guam, and the Virgin Islands.  
+```{r}
+summary(train_samp$STATE)
+```
+
+* __GENDER__ includes "U" for Unknown and "J" for Joint Account, along with "M" for Male and "F" for Female. There are also possible coding errors "A" and "C" in the data, and 327 missing values coded as " ". We preserve this coding and consider "A", "C", and "U" to be " " as well.
+```{r}
+combi_sub$GENDER[combi_sub$GENDER == "A"] <- " "
+combi_sub$GENDER[combi_sub$GENDER == "C"] <- " "
+combi_sub$GENDER[combi_sub$GENDER == "U"] <- " "
+```
+
+* __HIT__ indicates the total number of known times the donor has responded to a mail order offer other than PVA's. For some reason, there are an unusually high number of observations with the value of 240, but there isn't any indication in the data's documentation what significance 240 might have. The next lowest value after 240 is 84.
+
+```{r}
+summary(train_samp$HIT)
+```
+
+* __MALEMILI__, __MALEVET__, __VIETVETS__ and __WWIIVETS__ are neighborhood-level variables recording % males active in the military, % male veterans, % Vietnam veterans, and % WWII veterans respectively, as reported by a third-party data source. __AFC2__, __AFC5__, __VC1__ and __VC3__ record the same thing as the above variables but come from 1990 census data. The other variables like this are __AFC1__ (% adults in active military service), __AFC3__ (% females in active military service), __AFC4__ (% adult veterans age 16+), __AFC6__ (% female veterans age 16+), __VC2__ (% Korean veterans age 16+), and __VC4__ (% veterans serving after May 1975 only).  
+
+```{r}
+histogram(train_samp$AFC1)
+histogram(train_samp$AFC4)
+```
+
+* __ETH7__, __ETH10__ and __ETH11__ are neighborhood-level variables recording % Japanese, % Korean and % Vietnamese respectively. We think there's a small possibility that these ecological variables have an impact on the predictor - maybe an inverse relationship of some sort. In any case, tree-based methods will assign very low importance to these variables if they turn out to not be relevant after all. The same logic goes for the "veteran" variables above.  
+
+```{r}
+### Rename ETH7, ETH10 and ETH11 for descriptiveness
+combi_sub$JAPANESE <- combi_sub$ETH7
+combi_sub$KOREAN <- combi_sub$ETH10
+combi_sub$VIETNAMESE <- combi_sub$ETH11
+```
+
+* __LOCALGOV__, __STATEGOV__ and __FEDGOV__ are the % employed by local government, state government, and federal government, respectively.  
+
+* __VETERANS__ indicates whether the individual donor has ever indicated interest in veterans' affairs, as collected by third-party data sources.  
+
+* __NUMPRM12__ is the number of promotions that a donor received between March 1996 and February 1997. The median is 12 promotions, or around one per month, and most values range from 7 to 15. but the full range of values is from 1 to 47.  
+```{r}
+summary(train_samp$NUMPRM12)
+```
+
+* __CARDGIFT__ is the number of gifts that a donor has ever made to a promotion over their lifetime. The median is 4 and the mode is 1. The values range from 0 to 41. This does not include unsolicited donations - there are 520 donors who have never given solicited donations, but have donated in some other fashion. (As previously stated, everyone in the dataset has donated at least once.)  
+
+```{r}
+summary(train_samp$CARDGIFT)
+```
+
+* __TIMELAG__ is the number of months between a donor's first and second donation. There are three observations with nonsense values (e.g. 1044 months), which we will treat as missing. Including those three, there are 1020 missing values. The median is 6 months.
+
+```{r}
+summary(train_samp$TIMELAG)
+combi_sub$TIMELAG[combi_sub$TIMELAG > 400] <- NA
+```
+
+* __AVGGIFT__ is the average dollar amount of all donations from each donor to date. The mean is 13.45 and the median is 11.5, but there are quite a few larger gifts.
+```{r}
+summary(train_samp$AVGGIFT)
+bwplot(train_samp$AVGGIFT)
+```
+
+* __LASTGIFT__ is the dollar amount of the most recent donation made by a donor. The mean is 17.42 and the median is 15.00.
+
+```{r}
+summary(train_samp$LASTGIFT)
+bwplot(train_samp$LASTGIFT)
+```
+
+* __RFA\_2R__, __RFA\_2F__, __RFA\_2A__, and __RFA\_3__ are "recency, frequency, amount" variables common in direct marketing. These variables range from __RFA\_2__ to __RFA\_24__ in the data, where each number refers to a particular promotion, in reverse date order (i.e. __RFA\_2__ is the most recent promotion, June 1997, and __RFA\_24__ is the earliest promotion, May-June 1994). Each category in an RFA variable consists of three characters. The first character is the donor's recency status (first-time, active, inactive, etc), the second is how many donations they gave within the last 12 months (or less) that they were active, and the third character categorizes the amount of their most recent gift as of the date of that promotion. Note that since this dataset only gathers people who have not donated anything between June 1996 and June 1997, the recency (R) status of every single person in the dataset for promotion 2 is L (Lapsed):  
+```{r}
+table(train_samp$RFA_2R)
+```
+We can thus look at individual donor history across 23 promotions, looking at changes in their status for example, but for this project we just focus on promotion 2 (June 1997), responses to which are measured by __TARGET\_B__, and promotion 3 (June 1996). The dataset already came with __RFA\_2__ split up into R, F and A; we do the same to __RFA\_3__, creating new variables __RFA\_3R__, __RFA\_3F__, and __RFA\_3A__.    
+```{r}
+### Split RFA_3 into R, F, and A. RFA_3 describes promotions given out June 1996 (18 were given out April 1996)
+combi_sub$RFA_3R[substr(combi_sub$RFA_3, 1, 1) == "F"] <- "First time donor"
+combi_sub$RFA_3R[substr(combi_sub$RFA_3, 1, 1) == "I"] <- "Inactive donor"
+combi_sub$RFA_3R[substr(combi_sub$RFA_3, 1, 1) == "N"] <- "New donor" 
+combi_sub$RFA_3R[substr(combi_sub$RFA_3, 1, 1) == "A"] <- "Active donor"
+combi_sub$RFA_3R[substr(combi_sub$RFA_3, 1, 1) == "L"] <- "Lapsing donor"
+combi_sub$RFA_3R[substr(combi_sub$RFA_3, 1, 1) == "S"] <- "Star donor" # gave to three or more promos consecutively
+combi_sub$RFA_3R[combi_sub$RFA_3 == " "] <- "Not mailed"
+combi_sub$RFA_3R <- as.factor(combi_sub$RFA_3R)
+
+combi_sub$RFA_3F[substr(combi_sub$RFA_3, 2, 2) == "1"] <- "One gift"
+combi_sub$RFA_3F[substr(combi_sub$RFA_3, 2, 2) == "2"] <- "Two gifts"
+combi_sub$RFA_3F[substr(combi_sub$RFA_3, 2, 2) == "3"] <- "Three gifts"
+combi_sub$RFA_3F[substr(combi_sub$RFA_3, 2, 2) == "4"] <- "Four or more gifts"
+combi_sub$RFA_3F[combi_sub$RFA_3 == " "] <- "Not mailed"
+combi_sub$RFA_3F <- as.factor(combi_sub$RFA_3F)
+
+combi_sub$RFA_3A[substr(combi_sub$RFA_3, 3, 3) == "A"] <- "$0.01 - $1.99"
+combi_sub$RFA_3A[substr(combi_sub$RFA_3, 3, 3) == "B"] <- "$2.00 - $2.99"
+combi_sub$RFA_3A[substr(combi_sub$RFA_3, 3, 3) == "C"] <- "$3.00 - $4.99"
+combi_sub$RFA_3A[substr(combi_sub$RFA_3, 3, 3) == "D"] <- "$5.00 - $9.99"
+combi_sub$RFA_3A[substr(combi_sub$RFA_3, 3, 3) == "E"] <- "$10.00 - $14.99"
+combi_sub$RFA_3A[substr(combi_sub$RFA_3, 3, 3) == "F"] <- "$15.00 - $24.99"
+combi_sub$RFA_3A[substr(combi_sub$RFA_3, 3, 3) == "G"] <- "$25.00 and above"
+combi_sub$RFA_3A[combi_sub$RFA_3 == " "] <- "Not mailed"
+combi_sub$RFA_3A <- as.factor(combi_sub$RFA_3A)
+```
+
+*  __PEPSTRFL__ indicates PEP Star RFA Status. We're not actually sure what this means, but it seems to indicate a type of priority donor.  
+```{r}
+table(train_samp$PEPSTRFL)
+```
+
+*  __MAJOR__ indicates whether a donor has ever given a $100+ donation at any point. In the training data, only 38 donors have done so.  
+```{r}
+table(train_samp$MAJOR)
+```
+
+* __MDMAUD\_R__, __MDMAUD\_F__, and __MDMAUD\_A__ are the recency, frequency, and amount variables for major donors. These are coded differently from the other RFA variables. Recency is coded as C for Current Donor, L for Lapsed, I for Inactive and D for Dormant; frequency is coded as 1 for one gift, 2 for two-four gifts and 5 for five+ gifts; amount is coded as L for "low dollar", C for "core", M for "major" and T for "top".  
+
+```{r}
+table(train_samp$MDMAUD_R)
+table(train_samp$MDMAUD_F)
+table(train_samp$MDMAUD_A)
+```
+
+Finally, we make the response variable a factor and then resplit into training and testing data.
+```{r}
+combi_sub$TARGET_B <- as.factor(combi_sub$TARGET_B)
+train_sub <- combi_sub[1:10000, ]
+test_sub <- combi_sub[10001:20000, ]
+```
+
+###3. Modelling & Prediction
+
+####Bayesian Additive Regression Trees using bartMachine  
+
+We pass a model predicting __TARGET\_B__ from variables selected to avoid redundancy (e.g. we didn't use all the neighborhood-level variables). We also set use\_missing\_data = TRUE and use_missing_data_dummies_as_covars = TRUE in order to take into account Kapelner and Bleich (2013)'s method for using missing data without imputation.  
+```{r}
+library(bartMachine)
+set_bart_machine_num_cores(parallel::detectCores())
+bart_fit <- bartMachine(X = train_sub[, c(6:8, 16:18, 22, 25, 32:36, 38:39, 41:43, 45:55)],
+                        y = train_sub$TARGET_B, mem_cache_for_speed = FALSE, use_missing_data = TRUE,
+                        use_missing_data_dummies_as_covars = TRUE)
+bart_fit
+bart_fit_pred <- predict(bart_fit, 
+                         new_data = test_sub[, c(6:8, 16:18, 22, 25, 32:36, 38:39, 41:43, 45:55)],
+                         type = "class")
+table(test_sub$TARGET_B, bart_fit_pred)
+```
+
+The predictions from bartMachine are the same as predicting that nobody donates. What if we set the classification threshold lower, from 0.5 to 0.2, so that all predictions with a probability of 0.2 or higher will be classified as donors?
+
+```{r}
+bart_fit_20 <- bartMachine(X = train_sub[, c(6:8, 16:18, 22, 25, 32:36, 38:39, 41:43, 45:55)],
+                           y = train_sub$TARGET_B, mem_cache_for_speed = FALSE, use_missing_data = TRUE,
+                           use_missing_data_dummies_as_covars = TRUE,prob_rule_class = 0.2)
+bart_fit_20
+bart_fit_20_pred <- predict(bart_fit_20,
+                            new_data = test_sub[, c(6:8, 16:18, 22, 25, 32:36, 38:39, 41:43, 45:55)],
+                            type = "class")
+table(test_sub$TARGET_B, bart_fit_20_pred)
+```
+
+The revised model still does no better than predicting nobody donates, which means that all of the predicted probabilies are less than 0.2. Perhaps the variables we selected provided very little information for prediction, or that further tweaking of the parameters is necessary.
+
+```{r}
+investigate_var_importance(bart_fit, num_var_plot = 20) # display only 20 variables in the plot
+```
+
+According to the variable inclusion proportions plot of the fitted BART model, the most "important" variables in fitting the model were the frequency of gifts for the June 1997 promo period, the number of promotions received in the last 12 months, and the average dollar amount of all donations from each donor to date. Some state-level and neighborhood-level variables were important as well. 
+
+####More pre-processing: Missing Data Imputation
+
+```{r}
+var <- c("PVASTATE_BIN", "URBANICITY", "NBHOOD_SES", "AGE", "HOMEOWNR_BIN", "WEALTH2_CAT", "GENDER", "HIT", "MAJOR", "VETERANS", "PEPSTRFL", "VIETNAMESE", "JAPANESE", "KOREAN", "AFC1", "AFC4", "NUMPRM12", "CARDGIFT", "TIMELAG", "AVGGIFT", "LASTGIFT", "RFA_2F", "RFA_2A", "RFA_3A", "RFA_3F", "RFA_3R", "MDMAUD_R", "MDMAUD_F", "MDMAUD_A", "TARGET_B")
+train_sub_var <- train_sub[, var]
+test_sub_var <- test_sub[, var]
+```
+
+Several of our selected features in the training set contain missing data. We think that while we could simply disregard missing values or omit the corresponding predictors, we could benefit from the available information by inferring the missing data from known values. bartMachine has built-in methods for dealing with missing data, but the other models we're going to look at don't.
+
+```{r}
+stopifnot(require(mice))
+md.pattern(train_sub_var)
+```
+
+There are 4,389 (out of 10,000) rows in the training set that are complete. The variables with missing data are: `TIMELAG`, `AGE`, and `WEALTH2_CAT`. Most missing values occur in `WEALTH2_CAT` (4,616).    
+
+We decide to create multivariate imputation by chained equations. The algorithm imputes an incomplete column by generating synthetic values given other columns in the dataset.  
+```{r}
+train_imp <- mice(train_sub_var, m = 5, maxit = 5)
+```
+
+To check whether the imputed data is plausible, we inspect some of the imputations for `AGE`, for example.
+
+```{r}
+train_imp$imp$AGE[1:50, ]
+```
+
+The observed and imputed data can be combined.
+
+```{r}
+train_com <- complete(train_imp)
+dim(train_com)
+```
+
+Further, we check the distributions of the observed and imputed data for `TIMELAG`, for example. We think that the graph indicates that the distributions of blue (observed values) and red (imputed values) are similar.
+
+```{r}
+com <- complete(train_imp, "long", include = TRUE)
+col <- rep(c("blue", "red")[1 + as.numeric(is.na(train_imp$data$TIMELAG))], 6)  # Separates the observed (blue) and imputed (red) data 
+stripplot(TIMELAG ~.imp, data = com, jit = TRUE, fac = 0.8, col = col, pch = 20, cex = 1.4, xlab = "Imputation")
+```
+
+We impute the test data in a similar manner, assuming that they are drawn from the same distribution.  
+
+```{r}
+test_imp <- mice(test_sub_var, m = 5, maxit = 5)
+test_com <- complete(test_imp)
+dim(test_com)
+```
+####Multilayer Perceptrons
+
+With the imputed data, we use a multilayer perceptron (a type of neural net) passing in the same predictors as before, except for STATE (because of the absence of data for one state in the testing set). The input data is transformed into a matrix and then normalized. The default arguments are used for the fit.
+```{r warning = FALSE}
+library(RSNNS)
+combi_com <- rbind(train_com, test_com)
+combi_com_mat <- model.matrix(TARGET_B ~ ., data = combi_com)[, -1]
+# Normalization: set continuous variables to mean 0 and sd 1
+combi_com_mat[, c(10, 27, 31:40)] <- normalizeData(combi_com_mat[, c(10, 27, 31:40)])
+train_com_mat <- combi_com_mat[1:10000, ]
+test_com_mat <- combi_com_mat[10001:20000, ]
+mlp_train_target <- decodeClassLabels(train_com$TARGET_B)
+mlp_test_target <- decodeClassLabels(test_com$TARGET_B)
+mlp_fit <- mlp(x = train_com_mat, y = mlp_train_target, size = c(5), maxit = 100,
+               learnFunc = "Std_Backpropagation", inputsTest = test_com_mat, 
+               targetsTest = mlp_test_target)
+mlp_pred <- predict(mlp_fit, test_com_mat)
+
+confusionMatrix(mlp_train_target, fitted.values(mlp_fit))
+confusionMatrix(mlp_test_target, encodeClassLabels(mlp_pred, method = "402040"))
+confusionMatrix(mlp_test_target, encodeClassLabels(mlp_pred, method = "WTA"))
+```
+
+The model fits the training data better than baseline (predicting nobody donates), but it performs either at baseline or worse than baseline, depending on the classification method. encodeClassLabels() converts continuous outputs from mlp to binary outputs for classification, and provides two ways of doing so. Using method "402040" gives us baseline predictions while method "WTA" does slightly worse than baseline.
+
+####Logistic Regression  
+
+```{r warning = FALSE}
+glm_fit <- glm(TARGET_B ~ ., data = train_com, family = "binomial"(link = "logit"))
+glm_pred <- predict(glm_fit, newdata = test_com, type = "response")
+table(test_com$TARGET_B, as.integer(glm_pred > 0.5))
+table(test_com$TARGET_B, as.integer(glm_pred > 0.2))
+```
+
+Fitting logistic regression on the imputed training data using a classification threshold of 0.5 performs at baseline. Lowering the classification threshold to 0.2 gives worse results, but produces some true positives.
+
+We update the list of predictors to include only the ones shown by bartMachine to be the most "important".
+
+```{r warning = FALSE}
+glm_new_fit <- glm(TARGET_B ~ LASTGIFT + AVGGIFT + CARDGIFT + NUMPRM12, data = train_com, family = "binomial"(link = "logit"))
+glm_new_pred <- predict(glm_new_fit, newdata = test_com, type = "response")
+table(test_com$TARGET_B, as.integer(glm_new_pred > 0.5))
+table(test_com$TARGET_B, as.integer(glm_new_pred > 0.2))
+```
+
+Still, the logistic model with fewer predictors does worse than before excluding the other predictors.
+
+####Random Forest
+
+Next we fit a randomForest model, using the following predictors (same as the first `glm` model).
+
+```{r}
+stopifnot(require(randomForest))
+rf_fit <- randomForest(TARGET_B ~ ., data = train_com, importance = TRUE)
+rf_pred <- predict(rf_fit, newdata = test_com, type = "response")
+rf_fit
+table(test_com$TARGET_B, rf_pred)
+```
+
+The confusion matrix in the model call suggests that the fit for the training set predicts that 0 people donate. The model on the testing set also predicts that 0 people donate. 
+
+```{r}
+par(mar = c(2,2,2,2))
+varImpPlot(rf_fit)
+```
+
+Based on the "importance" scores of existing predictors, we update the list of predictors to include only the most important ones.
+
+```{r}
+rf_new_fit <- randomForest(TARGET_B ~ AVGGIFT + CARDGIFT + LASTGIFT + NUMPRM12, data = train_com, importance = TRUE)
+rf_new_fit
+rf_new_pred <- predict(rf_new_fit, newdata = test_com, type = "response")
+table(test_com$TARGET_B, rf_new_pred)
+```
+
+Now the model correctly classifies 3 donors, although it also has 16 false positives.
+
+##glmnet
+
+We apply `glmnet` to classify donors via penalized maximum likelihood as objective function.
+
+```{r}
+stopifnot(require(glmnet))
+X <- model.matrix(TARGET_B ~ ., data = train_com)
+y <- train_com$TARGET_B
+path <- glmnet(X[, -1], y, family = "binomial")
+test_X <- model.matrix(TARGET_B ~ ., data = test_com)
+path_pred <- predict(path, newx = test_X[, -1], type = "response")
+z_path_pred <- path_pred > 0.5
+class <- which.max(colSums(apply(z_path_pred, MARGIN = 2, FUN = "==", e2 = y)))
+table(test_com$TARGET_B, as.integer(z_path_pred[, class]))
+```
+
+This model still underperforms the baseline prediction.
+
+###4. Conclusion
+
+Given the low proportion of donors in both the training and testing sets, it was difficult to develop a model that predicts better than baseline. The small variation in the response variable, as well as the great amount of missing data, both affect the performance of our classification models. The most viable point of improvement would be in feature selection.  
